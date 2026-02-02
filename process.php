@@ -211,67 +211,140 @@ try {
             break;
         
         case 'upload_audio':
-            writeLog("Audio upload request received", 'PROCESS');
+    writeLog("Audio upload request received", 'PROCESS');
+    
+    $audioFile = null;
+    $originalName = 'audio.mp3';
+    $isBinary = false;
+    
+    // Method 1: Direct file upload (multipart/form-data)
+    if (isset($_FILES['audio']) && $_FILES['audio']['error'] === UPLOAD_ERR_OK) {
+        $audioFile = $_FILES['audio']['tmp_name'];
+        $originalName = basename($_FILES['audio']['name']);
+        writeLog("Received direct file upload", 'PROCESS');
+    } 
+    // Method 2: Binary data in request body (from ElevenLabs, etc.)
+    else if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST)) {
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        $inputData = file_get_contents('php://input');
+        
+        // Check if it's binary audio data
+        if (!empty($inputData) && strlen($inputData) > 100) {
+            // Try to detect if it's JSON first
+            $jsonTest = json_decode($inputData, true);
             
-            $audioFile = null;
-            $originalName = 'audio.mp3';
-            
-            if (isset($_FILES['audio']) && $_FILES['audio']['error'] === UPLOAD_ERR_OK) {
-                $audioFile = $_FILES['audio']['tmp_name'];
-                $originalName = basename($_FILES['audio']['name']);
-                writeLog("Received direct file upload", 'PROCESS');
-            } else {
-                $url = null;
-                if (isset($_POST['audio_url'])) {
-                    $url = $_POST['audio_url'];
+            // If it's not JSON or doesn't have our expected fields, treat as binary
+            if ($jsonTest === null || (!isset($jsonTest['audio_url']) && !isset($jsonTest['filename']))) {
+                writeLog("Received binary audio data (" . strlen($inputData) . " bytes)", 'PROCESS');
+                
+                // Detect format from content-type or magic bytes
+                $extension = 'mp3'; // default
+                
+                if (strpos($contentType, 'audio/mpeg') !== false || strpos($contentType, 'audio/mp3') !== false) {
+                    $extension = 'mp3';
+                } elseif (strpos($contentType, 'audio/wav') !== false) {
+                    $extension = 'wav';
+                } elseif (strpos($contentType, 'audio/ogg') !== false) {
+                    $extension = 'ogg';
+                } elseif (strpos($contentType, 'audio/aac') !== false) {
+                    $extension = 'aac';
+                } elseif (strpos($contentType, 'audio/x-m4a') !== false) {
+                    $extension = 'm4a';
+                } elseif (strpos($contentType, 'audio/flac') !== false) {
+                    $extension = 'flac';
                 } else {
-                    $json = json_decode(file_get_contents('php://input'), true);
-                    if (isset($json['audio_url'])) {
-                        $url = $json['audio_url'];
+                    // Detect by magic bytes
+                    $magic = substr($inputData, 0, 16);
+                    
+                    if (substr($magic, 0, 3) === 'ID3' || substr($magic, 0, 2) === "\xFF\xFB" || substr($magic, 0, 2) === "\xFF\xF3") {
+                        $extension = 'mp3';
+                    } elseif (substr($magic, 0, 4) === 'RIFF' && substr($magic, 8, 4) === 'WAVE') {
+                        $extension = 'wav';
+                    } elseif (substr($magic, 0, 4) === 'OggS') {
+                        $extension = 'ogg';
+                    } elseif (substr($magic, 0, 4) === 'fLaC') {
+                        $extension = 'flac';
+                    } elseif (substr($magic, 4, 8) === 'ftypM4A ') {
+                        $extension = 'm4a';
                     }
                 }
                 
-                if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
-                    writeLog("Downloading audio from URL: $url", 'PROCESS');
-                    $audioFile = downloadFile($url);
-                    $originalName = basename(parse_url($url, PHP_URL_PATH));
-                }
+                // Save binary data to temporary file
+                $audioFile = UPLOAD_DIR . 'binary_' . uniqid() . '.' . $extension;
+                file_put_contents($audioFile, $inputData);
+                $originalName = 'audio.' . $extension;
+                $isBinary = true;
+                
+                writeLog("Binary data saved as $extension format", 'PROCESS');
             }
-            
-            if (!$audioFile || !file_exists($audioFile)) {
-                throw new Exception("No audio file provided. Use 'audio' for file upload or 'audio_url' for URL");
+        }
+    }
+    
+    // Method 3: URL in POST/JSON
+    if (!$audioFile) {
+        $url = null;
+        if (isset($_POST['audio_url'])) {
+            $url = $_POST['audio_url'];
+        } else {
+            $json = json_decode(file_get_contents('php://input'), true);
+            if (isset($json['audio_url'])) {
+                $url = $json['audio_url'];
             }
-            
-            $extension = pathinfo($originalName, PATHINFO_EXTENSION);
-            if (empty($extension) || !in_array(strtolower($extension), ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'])) {
-                $extension = 'mp3';
-            }
-            
-            $filename = 'audio_' . time() . '_' . uniqid() . '.' . $extension;
-            $outputPath = OUTPUT_DIR . $filename;
-            
-            if (isset($_FILES['audio'])) {
-                move_uploaded_file($audioFile, $outputPath);
-            } else {
-                rename($audioFile, $outputPath);
-            }
-            
-            if (!file_exists($outputPath)) {
-                throw new Exception("Failed to save audio file");
-            }
-            
-            $fileSize = filesize($outputPath);
-            writeLog("Audio uploaded successfully: $filename ($fileSize bytes)", 'PROCESS');
-            
-            echo json_encode([
-                'success' => true,
-                'message' => 'Audio uploaded successfully',
-                'filename' => $filename,
-                'file_size' => $fileSize,
-                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . $filename,
-                'timestamp' => date('Y-m-d H:i:s')
-            ]);
-            break;
+        }
+        
+        if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
+            writeLog("Downloading audio from URL: $url", 'PROCESS');
+            $audioFile = downloadFile($url);
+            $originalName = basename(parse_url($url, PHP_URL_PATH));
+        }
+    }
+    
+    if (!$audioFile || !file_exists($audioFile)) {
+        throw new Exception("No audio file provided. Supports: multipart file upload, binary data, or 'audio_url' parameter");
+    }
+    
+    // Verify it's actually audio data
+    $fileSize = filesize($audioFile);
+    if ($fileSize < 100) {
+        if (file_exists($audioFile)) unlink($audioFile);
+        throw new Exception("File is too small to be valid audio ($fileSize bytes)");
+    }
+    
+    // Generate unique filename
+    $extension = pathinfo($originalName, PATHINFO_EXTENSION);
+    if (empty($extension) || !in_array(strtolower($extension), ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'])) {
+        $extension = 'mp3';
+    }
+    
+    $filename = 'audio_' . time() . '_' . uniqid() . '.' . $extension;
+    $outputPath = OUTPUT_DIR . $filename;
+    
+    // Copy/move file to outputs directory
+    if (isset($_FILES['audio'])) {
+        move_uploaded_file($audioFile, $outputPath);
+    } else {
+        rename($audioFile, $outputPath);
+    }
+    
+    if (!file_exists($outputPath)) {
+        throw new Exception("Failed to save audio file");
+    }
+    
+    $fileSize = filesize($outputPath);
+    writeLog("Audio uploaded successfully: $filename ($fileSize bytes) [Binary: " . ($isBinary ? 'Yes' : 'No') . "]", 'PROCESS');
+    
+    echo json_encode([
+        'success' => true,
+        'message' => 'Audio uploaded successfully',
+        'filename' => $filename,
+        'file_size' => $fileSize,
+        'format' => $extension,
+        'source' => $isBinary ? 'binary' : 'file/url',
+        'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . $filename,
+        'timestamp' => date('Y-m-d H:i:s')
+    ]);
+    break;
+
         
         case 'delete_file':
             writeLog("Delete file request received", 'PROCESS');
