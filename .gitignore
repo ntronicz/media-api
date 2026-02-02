@@ -1,0 +1,7 @@
+logs/*.log
+uploads/*
+outputs/*
+!logs/.gitkeep
+!uploads/.gitkeep
+!outputs/.gitkeep
+.env
