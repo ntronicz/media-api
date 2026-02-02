@@ -13,7 +13,7 @@ $action = $_GET['action'] ?? '';
 // Function to download file from URL
 function downloadFile($url) {
     $filename = UPLOAD_DIR . uniqid() . '_' . basename(parse_url($url, PHP_URL_PATH));
-    $file = file_get_contents($url);
+    $file = @file_get_contents($url);
     if ($file === false) {
         throw new Exception("Failed to download file from URL: $url");
     }
@@ -95,7 +95,7 @@ try {
                 'success' => true,
                 'message' => 'Audio files merged successfully',
                 'output_file' => basename($outputFile),
-                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/api/outputs/' . basename($outputFile),
+                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . basename($outputFile),
                 'timestamp' => date('Y-m-d H:i:s')
             ]);
             break;
@@ -109,9 +109,9 @@ try {
                 throw new Exception("Both video and audio are required");
             }
             
-            writeLog("Video merge started: $video + $audio", 'PROCESS');
+            writeLog("Video+Audio merge started: $video + $audio", 'PROCESS');
             
-            $outputFile = OUTPUT_DIR . 'merged_video_' . time() . '.mp4';
+            $outputFile = OUTPUT_DIR . 'merged_video_audio_' . time() . '.mp4';
             
             // FFmpeg command to merge video and audio
             $command = sprintf(
@@ -126,26 +126,90 @@ try {
             
             if ($returnCode !== 0) {
                 writeLog("FFmpeg error: " . implode("\n", $output), 'ERROR');
-                throw new Exception("Video merge failed");
+                throw new Exception("Video+Audio merge failed");
             }
             
             // Clean up input files
             unlink($video);
             unlink($audio);
             
-            writeLog("Video merge completed: $outputFile", 'PROCESS');
+            writeLog("Video+Audio merge completed: $outputFile", 'PROCESS');
             
             echo json_encode([
                 'success' => true,
                 'message' => 'Video and audio merged successfully',
                 'output_file' => basename($outputFile),
-                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/api/outputs/' . basename($outputFile),
+                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . basename($outputFile),
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+            
+        case 'merge_videos':
+            // Merge two video files sequentially
+            $video1 = getFile('video1');
+            $video2 = getFile('video2');
+            
+            if (!$video1 || !$video2) {
+                throw new Exception("Both video1 and video2 are required");
+            }
+            
+            writeLog("Video merge started: $video1 + $video2", 'PROCESS');
+            
+            // Create a temporary file list for FFmpeg concat
+            $listFile = UPLOAD_DIR . 'videos_' . time() . '.txt';
+            $fileList = "file '" . realpath($video1) . "'\nfile '" . realpath($video2) . "'";
+            file_put_contents($listFile, $fileList);
+            
+            $outputFile = OUTPUT_DIR . 'merged_videos_' . time() . '.mp4';
+            
+            // Method 1: Try simple concat first (fast, no re-encoding)
+            $command = sprintf(
+                '%s -f concat -safe 0 -i %s -c copy %s 2>&1',
+                FFMPEG_PATH,
+                escapeshellarg($listFile),
+                escapeshellarg($outputFile)
+            );
+            
+            exec($command, $output, $returnCode);
+            
+            // If simple concat fails, try re-encoding (works for different formats)
+            if ($returnCode !== 0) {
+                writeLog("Simple concat failed, trying with re-encoding", 'PROCESS');
+                $output = []; // Clear previous output
+                
+                $command = sprintf(
+                    '%s -f concat -safe 0 -i %s -c:v libx264 -preset fast -c:a aac -b:a 192k %s 2>&1',
+                    FFMPEG_PATH,
+                    escapeshellarg($listFile),
+                    escapeshellarg($outputFile)
+                );
+                
+                exec($command, $output, $returnCode);
+            }
+            
+            // Clean up temporary files
+            unlink($listFile);
+            unlink($video1);
+            unlink($video2);
+            
+            if ($returnCode !== 0) {
+                writeLog("FFmpeg error: " . implode("\n", $output), 'ERROR');
+                throw new Exception("Video merge failed: " . implode(" ", array_slice($output, -3)));
+            }
+            
+            writeLog("Video merge completed: $outputFile", 'PROCESS');
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Videos merged successfully',
+                'output_file' => basename($outputFile),
+                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . basename($outputFile),
                 'timestamp' => date('Y-m-d H:i:s')
             ]);
             break;
             
         default:
-            throw new Exception("Invalid action. Use: merge_audio or merge_video");
+            throw new Exception("Invalid action. Use: merge_audio, merge_video, or merge_videos");
     }
     
 } catch (Exception $e) {

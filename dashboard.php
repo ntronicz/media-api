@@ -2,11 +2,17 @@
 require_once 'config.php';
 checkAuth();
 
+$logContent = '';
+if (file_exists(LOG_FILE)) {
+    $logContent = file_get_contents(LOG_FILE);
+}
+
 $stats = [
-    'total_processes' => substr_count(file_get_contents(LOG_FILE), '[PROCESS]'),
-    'audio_merges' => substr_count(file_get_contents(LOG_FILE), 'Audio merge'),
-    'video_merges' => substr_count(file_get_contents(LOG_FILE), 'Video merge'),
-    'errors' => substr_count(file_get_contents(LOG_FILE), '[ERROR]')
+    'total_processes' => substr_count($logContent, '[PROCESS]'),
+    'audio_merges' => substr_count($logContent, 'Audio merge started'),
+    'video_audio_merges' => substr_count($logContent, 'Video+Audio merge started'),
+    'video_merges' => substr_count($logContent, 'Video merge started'),
+    'errors' => substr_count($logContent, '[ERROR]')
 ];
 ?>
 <!DOCTYPE html>
@@ -41,11 +47,12 @@ $stats = [
             border-radius: 5px;
             cursor: pointer;
             text-decoration: none;
+            display: inline-block;
         }
         .logout-btn:hover { background: rgba(255,255,255,0.3); }
         .stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
@@ -88,6 +95,7 @@ $stats = [
             padding: 2px 6px;
             border-radius: 3px;
             font-family: 'Courier New', monospace;
+            font-size: 12px;
         }
         .logs-container {
             background: white;
@@ -148,6 +156,10 @@ $stats = [
             <div class="number"><?php echo $stats['audio_merges']; ?></div>
         </div>
         <div class="stat-card">
+            <h3>Video+Audio</h3>
+            <div class="number"><?php echo $stats['video_audio_merges']; ?></div>
+        </div>
+        <div class="stat-card">
             <h3>Video Merges</h3>
             <div class="number"><?php echo $stats['video_merges']; ?></div>
         </div>
@@ -160,14 +172,19 @@ $stats = [
     <div class="api-info">
         <h2>API Endpoints</h2>
         <div class="endpoint">
-            <strong>Merge Two Audios:</strong><br>
-            <code>POST <?php echo $_SERVER['HTTP_HOST']; ?>/api/process.php?action=merge_audio</code><br>
+            <strong>1. Merge Two Audios:</strong><br>
+            <code>POST <?php echo $_SERVER['HTTP_HOST']; ?>/process.php?action=merge_audio</code><br>
             Parameters: <code>audio1</code> (file/URL), <code>audio2</code> (file/URL)
         </div>
         <div class="endpoint">
-            <strong>Merge Video + Audio:</strong><br>
-            <code>POST <?php echo $_SERVER['HTTP_HOST']; ?>/api/process.php?action=merge_video</code><br>
+            <strong>2. Merge Video + Audio:</strong><br>
+            <code>POST <?php echo $_SERVER['HTTP_HOST']; ?>/process.php?action=merge_video</code><br>
             Parameters: <code>video</code> (file/URL), <code>audio</code> (file/URL)
+        </div>
+        <div class="endpoint">
+            <strong>3. Merge Two Videos:</strong><br>
+            <code>POST <?php echo $_SERVER['HTTP_HOST']; ?>/process.php?action=merge_videos</code><br>
+            Parameters: <code>video1</code> (file/URL), <code>video2</code> (file/URL)
         </div>
     </div>
 
