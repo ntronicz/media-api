@@ -3,7 +3,7 @@ require_once 'config.php';
 
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -179,7 +179,6 @@ try {
             
             $outputFile = OUTPUT_DIR . 'merged_videos_' . time() . '.mp4';
             
-            // ONE-PASS METHOD: Proper timestamp reset and normalization
             $command = sprintf(
                 '%s -i %s -i %s -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v0];[0:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a0];[1:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v1];[1:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" -map "[outv]" -map "[outa]" -c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k -movflags +faststart %s 2>&1',
                 FFMPEG_PATH,
@@ -211,8 +210,211 @@ try {
             ]);
             break;
         
+        case 'upload_audio':
+            writeLog("Audio upload request received", 'PROCESS');
+            
+            $audioFile = null;
+            $originalName = 'audio.mp3';
+            
+            if (isset($_FILES['audio']) && $_FILES['audio']['error'] === UPLOAD_ERR_OK) {
+                $audioFile = $_FILES['audio']['tmp_name'];
+                $originalName = basename($_FILES['audio']['name']);
+                writeLog("Received direct file upload", 'PROCESS');
+            } else {
+                $url = null;
+                if (isset($_POST['audio_url'])) {
+                    $url = $_POST['audio_url'];
+                } else {
+                    $json = json_decode(file_get_contents('php://input'), true);
+                    if (isset($json['audio_url'])) {
+                        $url = $json['audio_url'];
+                    }
+                }
+                
+                if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
+                    writeLog("Downloading audio from URL: $url", 'PROCESS');
+                    $audioFile = downloadFile($url);
+                    $originalName = basename(parse_url($url, PHP_URL_PATH));
+                }
+            }
+            
+            if (!$audioFile || !file_exists($audioFile)) {
+                throw new Exception("No audio file provided. Use 'audio' for file upload or 'audio_url' for URL");
+            }
+            
+            $extension = pathinfo($originalName, PATHINFO_EXTENSION);
+            if (empty($extension) || !in_array(strtolower($extension), ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'])) {
+                $extension = 'mp3';
+            }
+            
+            $filename = 'audio_' . time() . '_' . uniqid() . '.' . $extension;
+            $outputPath = OUTPUT_DIR . $filename;
+            
+            if (isset($_FILES['audio'])) {
+                move_uploaded_file($audioFile, $outputPath);
+            } else {
+                rename($audioFile, $outputPath);
+            }
+            
+            if (!file_exists($outputPath)) {
+                throw new Exception("Failed to save audio file");
+            }
+            
+            $fileSize = filesize($outputPath);
+            writeLog("Audio uploaded successfully: $filename ($fileSize bytes)", 'PROCESS');
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Audio uploaded successfully',
+                'filename' => $filename,
+                'file_size' => $fileSize,
+                'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . $filename,
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+        
+        case 'delete_file':
+            writeLog("Delete file request received", 'PROCESS');
+            
+            $filename = null;
+            
+            if (isset($_POST['filename'])) {
+                $filename = $_POST['filename'];
+            } else {
+                $json = json_decode(file_get_contents('php://input'), true);
+                if (isset($json['filename'])) {
+                    $filename = $json['filename'];
+                }
+            }
+            
+            if (!$filename) {
+                throw new Exception("Filename is required");
+            }
+            
+            // Security: Only allow deleting from outputs folder
+            $filename = basename($filename);
+            $filePath = OUTPUT_DIR . $filename;
+            
+            if (!file_exists($filePath)) {
+                throw new Exception("File not found: $filename");
+            }
+            
+            $fileSize = filesize($filePath);
+            
+            if (!unlink($filePath)) {
+                throw new Exception("Failed to delete file: $filename");
+            }
+            
+            writeLog("File deleted: $filename ($fileSize bytes freed)", 'PROCESS');
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'File deleted successfully',
+                'filename' => $filename,
+                'size_freed' => $fileSize,
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+        
+        case 'delete_multiple':
+            writeLog("Delete multiple files request received", 'PROCESS');
+            
+            $filenames = null;
+            
+            if (isset($_POST['filenames'])) {
+                $filenames = is_array($_POST['filenames']) ? $_POST['filenames'] : json_decode($_POST['filenames'], true);
+            } else {
+                $json = json_decode(file_get_contents('php://input'), true);
+                if (isset($json['filenames'])) {
+                    $filenames = $json['filenames'];
+                }
+            }
+            
+            if (!$filenames || !is_array($filenames)) {
+                throw new Exception("Filenames array is required");
+            }
+            
+            $deleted = [];
+            $failed = [];
+            $totalFreed = 0;
+            
+            foreach ($filenames as $filename) {
+                $filename = basename($filename);
+                $filePath = OUTPUT_DIR . $filename;
+                
+                if (file_exists($filePath)) {
+                    $size = filesize($filePath);
+                    if (unlink($filePath)) {
+                        $deleted[] = $filename;
+                        $totalFreed += $size;
+                        writeLog("File deleted: $filename", 'PROCESS');
+                    } else {
+                        $failed[] = $filename;
+                        writeLog("Failed to delete: $filename", 'ERROR');
+                    }
+                } else {
+                    $failed[] = $filename . " (not found)";
+                }
+            }
+            
+            writeLog("Batch delete: " . count($deleted) . " deleted, " . count($failed) . " failed", 'PROCESS');
+            
+            echo json_encode([
+                'success' => true,
+                'message' => count($deleted) . ' file(s) deleted, ' . count($failed) . ' failed',
+                'deleted' => $deleted,
+                'failed' => $failed,
+                'size_freed' => $totalFreed,
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+        
+        case 'list_files':
+            writeLog("List files request received", 'PROCESS');
+            
+            $files = [];
+            $totalSize = 0;
+            
+            if (is_dir(OUTPUT_DIR)) {
+                $allFiles = scandir(OUTPUT_DIR);
+                
+                foreach ($allFiles as $file) {
+                    if ($file === '.' || $file === '..') continue;
+                    
+                    $filePath = OUTPUT_DIR . $file;
+                    if (is_file($filePath)) {
+                        $size = filesize($filePath);
+                        $totalSize += $size;
+                        
+                        $files[] = [
+                            'filename' => $file,
+                            'size' => $size,
+                            'size_mb' => round($size / 1024 / 1024, 2),
+                            'created' => date('Y-m-d H:i:s', filemtime($filePath)),
+                            'download_url' => 'https://' . $_SERVER['HTTP_HOST'] . '/outputs/' . $file
+                        ];
+                    }
+                }
+            }
+            
+            usort($files, function($a, $b) {
+                return strtotime($b['created']) - strtotime($a['created']);
+            });
+            
+            writeLog("Listed " . count($files) . " files (Total: " . round($totalSize/1024/1024, 2) . " MB)", 'PROCESS');
+            
+            echo json_encode([
+                'success' => true,
+                'total_files' => count($files),
+                'total_size' => $totalSize,
+                'total_size_mb' => round($totalSize / 1024 / 1024, 2),
+                'files' => $files,
+                'timestamp' => date('Y-m-d H:i:s')
+            ]);
+            break;
+        
         default:
-            throw new Exception("Invalid action. Available: merge_audio, merge_video, merge_videos");
+            throw new Exception("Invalid action. Available: merge_audio, merge_video, merge_videos, upload_audio, delete_file, delete_multiple, list_files");
     }
     
 } catch (Exception $e) {
